@@ -52,6 +52,7 @@ def prepare_data(seqs_x, seqs_y, maxlen=None, n_words_src=30000,
         new_lengths_x = []
         new_lengths_y = []
         for l_x, s_x, l_y, s_y in zip(lengths_x, seqs_x, lengths_y, seqs_y):
+            # joelb: fencepost error?  should be <= if we mean max allowed.
             if l_x < maxlen and l_y < maxlen:
                 new_seqs_x.append(s_x)
                 new_lengths_x.append(l_x)
@@ -101,9 +102,15 @@ def init_params(options):
                                               prefix='encoder_r',
                                               nin=options['dim_word'],
                                               dim=options['dim'])
-    ctxdim = 2 * options['dim']
+
+    # joelb: ctxdim is the size of the h vectors.  If we increase it here
+    # (via a parameter), it looks like it will create the correctly sized
+    # matrices and vectors below.
+    ctxdim = 2 * options['dim'] + 500
 
     # init_state, init_cell
+    # ff_state_W, Winit
+    # ff_state_b
     params = get_layer_param('ff')(options, params, prefix='ff_state',
                                 nin=ctxdim, nout=options['dim'])
     # decoder
@@ -113,17 +120,25 @@ def init_params(options):
                                               dim=options['dim'],
                                               dimctx=ctxdim)
     # readout
+    # ff_logit_lstm_W, Wt1
+    # ff_logit_lstm_b
     params = get_layer_param('ff')(options, params, prefix='ff_logit_lstm',
                                 nin=options['dim'], nout=options['dim_word'],
                                 ortho=False)
+    # ff_logit_prev_W, Wt2
+    # ff_logit_prev_b
     params = get_layer_param('ff')(options, params, prefix='ff_logit_prev',
                                 nin=options['dim_word'],
                                 nout=options['dim_word'], ortho=False)
+    # ff_logit_ctx_W, Wt3
+    # ff_logit_ctx_b
     params = get_layer_param('ff')(options, params, prefix='ff_logit_ctx',
                                 nin=ctxdim, nout=options['dim_word'],
                                 ortho=False)
 
 
+    # ff_logit_W, Wo
+    # ff_logit_b
     params = get_layer_param('ff')(options, params, prefix='ff_logit',
                                 nin=options['dim_word'],
                                 nout=options['n_words'],
@@ -218,7 +233,6 @@ def build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=False
 
     return x, ctx
 
-
 # build a training model
 def build_model(tparams, options):
     opt_ret = dict()
@@ -234,6 +248,19 @@ def build_model(tparams, options):
     y_mask.tag.test_value = numpy.ones(shape=(8, 10)).astype('float32')
 
     x, ctx = build_encoder(tparams, options, trng, use_noise, x_mask, sampling=False)
+
+    # joelb: ctx here are the h vectors - I think this is where we need to
+    # append the pv.  But see below about ctx_mean.
+    #
+    # joelb: Here we append an extra 500 zeros to the ctx vector we got from
+    # the encoder to simulate adding a real pv of length 500 when we have
+    # them.  The tricky part here was figuring out the real shape of ctx.
+    # Conceptually it's just a vector.  Empirically (because I can't see
+    # the theano shapes at runtime), I found that ctx actually had 3
+    # dimensions where the first two are empty.
+    pv = tensor.zeros((1, 1, 500))
+    ctx = concatenate([ctx, pv], axis=2)
+
     n_samples = x.shape[2]
     n_timesteps_trg = y.shape[0]
 
@@ -256,6 +283,11 @@ def build_model(tparams, options):
         ctx_dropout_d = theano.shared(numpy.array([1.]*4, dtype='float32'))
 
     # mean of the context (across time) will be used to initialize decoder rnn
+    # joelb: If pv is the same for every word in the sentence, the average
+    # should be fine.  But if each pv is a different word embedding for each
+    # word, that's probably not right.  See this proposed experiment:
+    # https://github.com/ISI-FLYOVER/research/issues/33
+    # ScottM doesn't this is a problem.
     ctx_mean = (ctx * x_mask[:, :, None]).sum(0) / x_mask.sum(0)[:, None]
 
     # or you can use the last state of forward + backward encoder rnns
@@ -357,6 +389,13 @@ def build_sampler(tparams, options, use_noise, trng, return_alignment=False):
         ctx_dropout_d = theano.shared(numpy.array([1.]*4, dtype='float32'))
 
     x, ctx = build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=True)
+
+    # joelb: Here we append an extra 500 zeros to the ctx vector we got from
+    # the encoder to simulate adding a real pv of length 500 when we have
+    # them.
+    pv = tensor.zeros((1, 1, 500))
+    ctx = concatenate([ctx, pv], axis=2)
+
     n_samples = x.shape[2]
 
     # get the input for decoder rnn initializer mlp

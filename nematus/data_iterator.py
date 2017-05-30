@@ -130,6 +130,20 @@ class TextIterator:
                 except IndexError:
                     break
                 tmp = []
+                # joelb: This splits factors on '|' and looks up each factor
+                # in its dictionary.  If not present, 1 is used for the UNK
+                # word.  In build_dictionary.py (and other places) we see:
+                #   worddict['eos'] = 0
+                #   worddict['UNK'] = 1
+                # There's a potential bug here if the actual words 'eos' or
+                # 'UNK' are present in the data.  In fact, in the wmt16 ro-en
+                # sample, looks like this happens!
+                #   $ head -5 train.bpe.en.json
+                #   {
+                #     "eos": 43485,  <--- oops
+                #     "UNK": 1,
+                #     "the": 2,
+                #     ",": 3,
                 for w in ss:
                     w = [self.source_dicts[i][f] if f in self.source_dicts[i] else 1 for (i,f) in enumerate(w.split('|'))]
                     tmp.append(w)
@@ -142,6 +156,10 @@ class TextIterator:
                 if self.n_words_target > 0:
                     tt = [w if w < self.n_words_target else 1 for w in tt]
 
+                # joelb: bug here?  should be 'or' not 'and'?  Current code
+                # allows one side to have any length.  But this issue is
+                # masked because code in prepare_date() reapplies the maxlen
+                # limit.  (But there's a fencepost error there!)
                 if len(ss) > self.maxlen and len(tt) > self.maxlen:
                     continue
                 if self.skip_empty and (not ss or not tt):
